@@ -4,13 +4,17 @@
 //! (so `.gitignore` and friends are respected by default), runs the
 //! configured AST patterns on each supported file and produces a
 //! [`Finding`] for every identifier that turns out to be Pinyin.
+//!
+//! File processing is parallelised via [`rayon`] so that large
+//! directory trees benefit from multiple cores.
 
 use std::collections::HashSet;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ast_grep_language::{LanguageExt, SupportLang};
 use ignore::WalkBuilder;
+use rayon::prelude::*;
 use regex::Regex;
 
 use crate::lang;
@@ -35,8 +39,8 @@ pub struct ScanOptions<'a> {
 /// pipeline. Errors reading individual files are silently skipped — the
 /// scan is best-effort, like ripgrep / ast-grep CLI.
 pub fn scan(opts: &ScanOptions) -> Vec<Finding> {
-    let mut findings = Vec::new();
-    let mut seen: HashSet<(PathBuf, usize, usize)> = HashSet::new();
+    // ── Phase 1: collect every supported file (serial, IO-bound) ──────
+    let mut files: Vec<(PathBuf, SupportLang)> = Vec::new();
 
     for root in opts.paths {
         let walker = WalkBuilder::new(root).build();
@@ -46,78 +50,89 @@ pub fn scan(opts: &ScanOptions) -> Vec<Finding> {
                 continue;
             }
             let path = entry.path();
-            let Some(detected_lang) = opts
-                .forced_lang
-                .or_else(|| lang::from_path(path))
-            else {
+            let Some(detected_lang) = opts.forced_lang.or_else(|| lang::from_path(path)) else {
                 continue;
             };
+            files.push((path.to_path_buf(), detected_lang));
+        }
+    }
 
-            let Ok(src) = fs::read_to_string(path) else {
+    // ── Phase 2: process files in parallel (CPU-bound) ───────────────
+    let user = &opts.user_patterns;
+    let ignore_regexes = &opts.ignore_regexes;
+
+    files
+        .par_iter()
+        .flat_map(|(path, lang)| process_file(path, *lang, user, ignore_regexes))
+        .collect()
+}
+
+/// Process a single file: parse, match patterns, analyse identifiers.
+/// Returns zero or more [`Finding`]s for the file.
+fn process_file(
+    path: &Path,
+    lang: SupportLang,
+    user_patterns: &[PatternSpec],
+    ignore_regexes: &[Regex],
+) -> Vec<Finding> {
+    let src = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+
+    let patterns: &[PatternSpec] = if user_patterns.is_empty() {
+        default_patterns(lang)
+    } else {
+        user_patterns
+    };
+    if patterns.is_empty() {
+        return Vec::new();
+    }
+
+    let mut findings = Vec::new();
+    let mut seen: HashSet<(usize, usize)> = HashSet::new();
+
+    let ast = lang.ast_grep(&src);
+    let root_node = ast.root();
+
+    for pat in patterns {
+        for nm in root_node.find_all(pat.source) {
+            let env = nm.get_env();
+            let Some(node) = env.get_match(pat.meta_var) else {
                 continue;
             };
+            let identifier = node.text().to_string();
 
-            let user = &opts.user_patterns;
-            let patterns: &[PatternSpec] = if user.is_empty() {
-                default_patterns(detected_lang)
-            } else {
-                user.as_slice()
-            };
-            if patterns.is_empty() {
+            if ignore_regexes.iter().any(|r| r.is_match(&identifier)) {
                 continue;
             }
 
-            let ast = detected_lang.ast_grep(&src);
-            let root_node = ast.root();
+            let start = node.start_pos();
+            let end = node.end_pos();
+            let key = (start.line(), start.column(node));
+            if !seen.insert(key) {
+                continue;
+            }
 
-            for pat in patterns {
-                for nm in root_node.find_all(pat.source) {
-                    let env = nm.get_env();
-                    let Some(node) = env.get_match(pat.meta_var) else {
-                        continue;
-                    };
-                    let identifier = node.text().to_string();
-
-                    if opts
-                        .ignore_regexes
-                        .iter()
-                        .any(|r| r.is_match(&identifier))
-                    {
-                        continue;
-                    }
-
-                    let start = node.start_pos();
-                    let end = node.end_pos();
-                    let key = (
-                        path.to_path_buf(),
-                        start.line(),
-                        start.column(node),
-                    );
-                    if !seen.insert(key) {
-                        continue;
-                    }
-
-                    if let Some(analysis) = analyze(&identifier) {
-                        findings.push(Finding {
-                            file: Some(path.to_path_buf()),
-                            range: Some(Range {
-                                start: Position {
-                                    line: start.line(),
-                                    column: start.column(node),
-                                },
-                                end: Position {
-                                    line: end.line(),
-                                    column: end.column(node),
-                                },
-                            }),
-                            identifier: analysis.identifier,
-                            tokens: analysis.tokens,
-                            score: analysis.score,
-                            confidence: analysis.confidence,
-                            ambiguous: analysis.ambiguous,
-                        });
-                    }
-                }
+            if let Some(analysis) = analyze(&identifier) {
+                findings.push(Finding {
+                    file: Some(path.to_path_buf()),
+                    range: Some(Range {
+                        start: Position {
+                            line: start.line(),
+                            column: start.column(node),
+                        },
+                        end: Position {
+                            line: end.line(),
+                            column: end.column(node),
+                        },
+                    }),
+                    identifier: analysis.identifier,
+                    tokens: analysis.tokens,
+                    score: analysis.score,
+                    confidence: analysis.confidence,
+                    ambiguous: analysis.ambiguous,
+                });
             }
         }
     }
