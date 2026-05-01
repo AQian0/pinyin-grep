@@ -15,9 +15,9 @@ use crate::segment::segment;
 /// Common English short words that happen to overlap with valid Pinyin
 /// syllables. Used to dampen false positives for single-token identifiers.
 const ENGLISH_WORDS: &[&str] = &[
-    "an", "me", "you", "men", "ban", "can", "fan", "man", "pan", "ran", "tan", "han",
-    "ha", "he", "ma", "pa", "la", "ya", "yo", "die", "tie", "pie", "lie",
-    "pin", "bin", "den", "pen", "hen", "pi", "mu", "ping", "ming",
+    "an", "me", "you", "men", "ban", "can", "fan", "man", "pan", "ran", "tan", "han", "ha", "he",
+    "ma", "pa", "la", "ya", "yo", "die", "tie", "pie", "lie", "pin", "bin", "den", "pen", "hen",
+    "pi", "mu", "ping", "ming",
 ];
 
 fn english_word_set() -> &'static std::collections::HashSet<&'static str> {
@@ -59,7 +59,7 @@ impl Confidence {
 #[derive(Debug, Clone, Serialize)]
 pub struct TokenAnalysis {
     pub text: String,
-    pub syllables: Vec<Vec<String>>,
+    pub syllables: Vec<Vec<&'static str>>,
 }
 
 /// Result of [`analyze`] for a single identifier.
@@ -86,15 +86,9 @@ pub fn analyze(identifier: &str) -> Option<Analysis> {
 
     let token_analyses: Vec<TokenAnalysis> = raw_tokens
         .iter()
-        .map(|t| {
-            let segs: Vec<Vec<String>> = segment(t)
-                .into_iter()
-                .map(|s| s.into_iter().map(String::from).collect())
-                .collect();
-            TokenAnalysis {
-                text: t.clone(),
-                syllables: segs,
-            }
+        .map(|t| TokenAnalysis {
+            text: t.clone(),
+            syllables: segment(t),
         })
         .collect();
 
@@ -203,10 +197,10 @@ pub fn pretty_syllables(analysis: &Analysis) -> String {
     for tok in &analysis.tokens {
         if let Some(seg) = tok.syllables.first() {
             for s in seg {
-                parts.push(s.clone());
+                parts.push(*s);
             }
         } else {
-            parts.push(tok.text.clone());
+            parts.push(&tok.text);
         }
     }
     parts.join("·")

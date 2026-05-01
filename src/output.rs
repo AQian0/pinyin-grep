@@ -114,10 +114,10 @@ fn preferred_syllables(tokens: &[TokenAnalysis]) -> String {
     for tok in tokens {
         if let Some(seg) = tok.syllables.first() {
             for s in seg {
-                parts.push(s.clone());
+                parts.push(*s);
             }
         } else {
-            parts.push(tok.text.clone());
+            parts.push(&tok.text);
         }
     }
     parts.join("·")
@@ -149,8 +149,14 @@ mod tests {
         Finding {
             file: Some(PathBuf::from("src/foo.ts")),
             range: Some(Range {
-                start: Position { line: 10, column: 6 },
-                end: Position { line: 10, column: 6 + ident.len() },
+                start: Position {
+                    line: 10,
+                    column: 6,
+                },
+                end: Position {
+                    line: 10,
+                    column: 6 + ident.len(),
+                },
             }),
             identifier: a.identifier,
             tokens: a.tokens,
